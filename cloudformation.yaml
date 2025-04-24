@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation шаблон для статичного веб-сайту на S3 з інтеграцією GitHub'
+
+Resources:
+  # Ресурс з'єднання GitHub
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: GitHubConnectionForStaticSite
+      ProviderType: GitHub
+  
+  # S3 бакет для зберігання веб-сайту
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+  
+  # Налаштування політики доступу для бакета
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Join ['', ['arn:aws:s3:::', !Ref WebsiteBucket, '/*']]
+  
+  # S3 бакет для артефактів CodePipeline
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+  
+  # Роль для CodePipeline
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'codestar-connections:UseConnection'
+                Resource: !Ref GitHubConnection
+  
+  # CodePipeline для автоматичної доставки
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: GitHubConnection
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        # Етап отримання коду з GitHub
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref GitHubConnection
+                FullRepositoryId: "#{RepositoryOwner}/#{RepositoryName}"  # Буде введено під час створення стеку
+                BranchName: master
+              OutputArtifacts:
+                - Name: SourceCode
+        
+        # Етап розгортання на S3
+        - Name: Deploy
+          Actions:
+            - Name: DeployToS3
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                BucketName: !Ref WebsiteBucket
+                Extract: true
+              InputArtifacts:
+                - Name: SourceCode
+
+Outputs:
+  WebsiteURL:
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+    Description: URL для доступу до статичного веб-сайту
+  
+  S3BucketName:
+    Value: !Ref WebsiteBucket
+    Description: Назва S3 бакета
+  
+  ConnectionStatus:
+    Value: !GetAtt GitHubConnection.ConnectionStatus
+    Description: Статус з'єднання з GitHub (перевірте, чи він у стані AVAILABLE)
